@@ -5,6 +5,7 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
+const axios = require('axios'); // Add axios for HTTP requests
 
 // Initialize the app
 const app = express();
@@ -77,6 +78,9 @@ const CONFIG = {
   COMMISSION_RATE: 0.10, // 10% commission
   ADMIN_EMAILS: ['info@kenyaonabudgetsafaris.co.uk', 'amiraalexobbs@gmail.com'],
   MIN_PAYOUT_AMOUNT: 50, // Minimum amount in GBP for payouts
+  EMAIL_CLOUD_FUNCTION: `https://us-central1-kenya-on-a-budget-safaris.cloudfunctions.net/sendEmailHTTP`,
+  PROJECT_ID: 'kenya-on-a-budget-safaris',
+  REGION: 'us-central1'
 };
 
 // Email setup - with ORIGINAL email configuration
@@ -100,6 +104,98 @@ function generateReferralCode(userId, linkType) {
   const timestamp = Date.now().toString(36).substring(0, 4);
   
   return `${prefix}-${typePrefix}-${random}-${timestamp}`;
+}
+
+// New email sending function with improved logic and fallbacks
+async function sendEmail(to, subject, htmlContent, options = {}) {
+  const { isAdmin = false, emailKey = `email-${Date.now()}`, retries = 3 } = options;
+  console.log(`Attempting to send email to ${to}: ${subject}`);
+  
+  // Try cloud function first (preferred method)
+  try {
+    console.log(`Sending email via cloud function to: ${to}`);
+    const cloudFunctionUrl = CONFIG.EMAIL_CLOUD_FUNCTION;
+    
+    const response = await axios.post(cloudFunctionUrl, {
+      to,
+      subject,
+      receiptHtml: htmlContent,
+      isAdmin,
+      emailKey
+    }, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Origin': 'https://kenyaonabudgetsafaris.co.uk'
+      }
+    });
+    
+    if (response.status >= 200 && response.status < 300) {
+      console.log(`Email sent successfully via cloud function to ${to}`);
+      return true;
+    }
+    throw new Error(`HTTP error: ${response.status}`);
+  } catch (error) {
+    console.error(`Error sending email via cloud function to ${to}:`, error);
+    
+    // Fallback to nodemailer
+    try {
+      console.log(`Falling back to nodemailer for ${to}`);
+      await transporter.sendMail({
+        from: `"Kenya on a Budget Safaris" <${process.env.EMAIL_USER}>`,
+        to,
+        subject,
+        html: htmlContent
+      });
+      console.log(`Email sent successfully via nodemailer to ${to}`);
+      return true;
+    } catch (error) {
+      console.error(`Error sending email via nodemailer to ${to}:`, error);
+      
+      // Last resort - save to pendingEmails in Firestore
+      if (db) {
+        try {
+          console.log(`Saving email to pendingEmails collection for ${to}`);
+          // Check if there's already a pending email to avoid duplicates
+          const pendingEmailsRef = db.collection('pendingEmails');
+          const existingEmails = await pendingEmailsRef
+            .where('to', '==', to)
+            .where('emailKey', '==', emailKey)
+            .where('processed', '==', false)
+            .limit(1)
+            .get();
+            
+          if (existingEmails.empty) {
+            await pendingEmailsRef.add({
+              to,
+              subject,
+              receiptHtml: htmlContent,
+              isAdmin,
+              timestamp: admin.firestore.FieldValue.serverTimestamp(),
+              processed: false,
+              emailKey,
+              retryCount: 0,
+              lastAttempt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            console.log(`Email saved to pendingEmails collection for ${to}`);
+            return true;
+          } else {
+            console.log(`Pending email already exists for ${to}, skipping to avoid duplicate`);
+            return true;
+          }
+        } catch (error) {
+          console.error(`Error saving email to pendingEmails for ${to}:`, error);
+          return false;
+        }
+      }
+      
+      if (retries > 0) {
+        console.log(`Retrying email send to ${to}, ${retries} attempts remaining`);
+        return await sendEmail(to, subject, htmlContent, { ...options, retries: retries - 1 });
+      }
+      
+      return false;
+    }
+  }
 }
 
 // API Endpoints - Using the original client paths
@@ -612,6 +708,7 @@ async function createInitialReferralLinks(userId) {
   }
 }
 
+// Updated conversion email function with modern template
 async function sendConversionEmails(affiliateId, linkId, purchaseAmount, commissionAmount, details) {
   try {
     // Get affiliate details
@@ -626,182 +723,586 @@ async function sendConversionEmails(affiliateId, linkId, purchaseAmount, commiss
     const packageName = details.packageName || 'Safari Package';
     const formattedCommission = commissionAmount.toFixed(2);
     const formattedPurchase = purchaseAmount.toFixed(2);
+    const referenceId = 'COMM-' + crypto.randomBytes(3).toString('hex').toUpperCase();
     
-    // Send email to affiliate
+    // Generate a unique receipt number for this conversion
+    const receiptNumber = `CONV-${Date.now().toString(36).substring(3, 9).toUpperCase()}`;
+    
+    // Current date formatted nicely
+    const currentDate = new Date().toLocaleDateString('en-GB', {
+      day: '2-digit',
+      month: 'long',
+      year: 'numeric'
+    }) + ' at ' + new Date().toLocaleTimeString('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+    
+    // Send email to affiliate with modern template
     if (affiliateData.email) {
       const affiliateEmailHtml = `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e6e6e6;">
-          <div style="background-color: #e67e22; padding: 20px; text-align: center; color: white;">
-            <h1 style="margin: 0;">New Commission Earned!</h1>
-          </div>
-          
-          <div style="padding: 20px;">
-            <p>Hello ${affiliateData.name || 'Affiliate'},</p>
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>New Commission Earned - KenyaOnABudget Safaris</title>
+        </head>
+        <body style="font-family: Arial, Helvetica, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f7f7f7;">
+          <table cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width: 650px; margin: 0 auto; background-color: #ffffff;">
+            <!-- Header -->
+            <tr>
+              <td style="padding: 20px; text-align: center; background-color: #ffffff; border-bottom: 1px solid #e0e0e0;">
+                <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                  <tr>
+                    <td>
+                      <div style="display: inline-block; width: 50px; height: 50px; background-color: #f5f5f5; border-radius: 8px; text-align: center; line-height: 50px; font-weight: bold; font-size: 24px; color: #e67e22;">K</div>
+                    </td>
+                    <td style="padding-left: 15px; text-align: left;">
+                      <h1 style="margin: 0; font-size: 24px; color: #e67e22;">KenyaOnABudget Safaris</h1>
+                      <p style="margin: 5px 0 0; font-size: 14px; color: #666;">Kenya On Your Terms: Smart Or Grand We Make it Happen!</p>
+                    </td>
+                  </tr>
+                </table>
+                <p style="margin-top: 15px; font-size: 14px; color: #666; text-align: right;">
+                  Commission Alert #${referenceId}<br>
+                  ${currentDate}
+                </p>
+              </td>
+            </tr>
             
-            <p>Great news! You've just earned a commission from a new booking.</p>
+            <!-- Banner -->
+            <tr>
+              <td style="padding: 30px 20px; background-color: #e67e22; color: #ffffff;">
+                <h2 style="margin: 0 0 10px; font-size: 24px;">New Commission Earned!</h2>
+                <p style="margin: 0 0 15px; font-size: 18px;">Great news! You've just earned a commission from a new booking.</p>
+                <p style="margin: 0; font-size: 16px; background-color: rgba(255,255,255,0.2); display: inline-block; padding: 5px 10px; border-radius: 4px;">Commission: £${formattedCommission}</p>
+              </td>
+            </tr>
             
-            <div style="background-color: #f8f8f8; padding: 15px; margin: 20px 0; border-left: 4px solid #e67e22;">
-              <p><strong>Package:</strong> ${packageName}</p>
-              <p><strong>Booking Amount:</strong> £${formattedPurchase}</p>
-              <p><strong>Your Commission (10%):</strong> £${formattedCommission}</p>
-              <p><strong>Status:</strong> Pending (will be available after the booking is confirmed)</p>
-            </div>
+            <!-- Commission Information -->
+            <tr>
+              <td style="padding: 30px 20px;">
+                <h3 style="margin: 0 0 20px; font-size: 18px; color: #e67e22; border-bottom: 2px solid #e67e22; padding-bottom: 10px;">Booking Details</h3>
+                <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 20px; background-color: #f8f8f8; border-radius: 8px; border-left: 4px solid #e67e22;">
+                  <tr>
+                    <td style="padding: 20px;">
+                      <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                        <tr>
+                          <td width="50%" valign="top" style="padding-bottom: 15px;">
+                            <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Package</p>
+                            <p style="margin: 0; font-size: 16px; font-weight: 600;">${packageName}</p>
+                          </td>
+                          <td width="50%" valign="top" style="padding-bottom: 15px;">
+                            <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Booking Amount</p>
+                            <p style="margin: 0; font-size: 16px; font-weight: 600;">£${formattedPurchase}</p>
+                          </td>
+                        </tr>
+                        <tr>
+                          <td width="50%" valign="top" style="padding-bottom: 15px;">
+                            <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Your Commission (10%)</p>
+                            <p style="margin: 0; font-size: 16px; font-weight: 600;">£${formattedCommission}</p>
+                          </td>
+                          <td width="50%" valign="top" style="padding-bottom: 15px;">
+                            <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Status</p>
+                            <p style="margin: 0; font-size: 16px; font-weight: 600; display: inline-block; padding: 3px 10px; background-color: #FFB74D; color: white; border-radius: 12px;">Pending</p>
+                          </td>
+                        </tr>
+                        <tr>
+                          <td width="50%" valign="top">
+                            <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Reference ID</p>
+                            <p style="margin: 0; font-size: 16px; font-weight: 600;">${referenceId}</p>
+                          </td>
+                          <td width="50%" valign="top">
+                            <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Date</p>
+                            <p style="margin: 0; font-size: 16px; font-weight: 600;">${currentDate}</p>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                </table>
+                
+                <p style="margin-bottom: 20px; font-size: 16px; color: #444; line-height: 1.5;">
+                  This commission will be added to your affiliate dashboard and will be available for withdrawal once the booking is confirmed.
+                </p>
+                
+                <p style="margin-bottom: 30px; font-size: 16px; color: #444; line-height: 1.5;">
+                  Keep up the great work promoting our safaris!
+                </p>
+                
+                <div style="text-align: center;">
+                  <a href="https://kenyaonabudgetsafaris.co.uk/affiliate-dashboard.html" style="background-color: #e67e22; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: 600; display: inline-block;">View Your Dashboard</a>
+                </div>
+                
+                <!-- Thank You Message -->
+                <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 30px 0 10px; text-align: center; border-top: 1px dashed #e0e0e0; border-bottom: 1px dashed #e0e0e0;">
+                  <tr>
+                    <td style="padding: 30px 0;">
+                      <p style="margin: 0; font-size: 16px; color: #444; font-style: italic;">Thank you for being a valued affiliate partner of KenyaOnABudget Safaris!</p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
             
-            <p>This commission will be added to your affiliate dashboard and will be available for withdrawal once it's confirmed.</p>
-            
-            <p>Keep up the great work promoting our safaris!</p>
-            
-            <p style="margin-top: 30px;">
-              <a href="https://kenyaonabudgetsafaris.co.uk/affiliate-dashboard.html" style="background-color: #e67e22; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Your Dashboard</a>
-            </p>
-            
-            <p style="margin-top: 30px; font-style: italic; color: #666; border-top: 1px solid #eee; padding-top: 15px;">
-              Thank you for being a valued affiliate partner of KenyaOnABudget Safaris!
-            </p>
-          </div>
-        </div>
+            <!-- Footer -->
+            <tr>
+              <td style="padding: 20px; background-color: #f5f5f5; text-align: center; font-size: 14px; color: #666;">
+                <p style="margin: 0 0 10px; font-weight: 700; color: #555; font-size: 16px;">KenyaOnABudget Safaris</p>
+                <p style="margin: 0 0 10px;">FARINGDON (SN7), SHELLINGFORD, FERNHAM ROAD<br>UNITED KINGDOM</p>
+                <p style="margin: 10px 0;">
+                  Email: <a href="mailto:info@kenyaonabudgetsafaris.co.uk" style="color: #e67e22; text-decoration: none;">info@kenyaonabudgetsafaris.co.uk</a> | 
+                  Phone: +44 7376 642 148
+                </p>
+                <p style="margin: 20px 0 0; font-size: 12px; color: #777;">
+                  &copy; ${new Date().getFullYear()} KenyaOnABudget Safaris. All rights reserved.
+                </p>
+              </td>
+            </tr>
+          </table>
+        </body>
+        </html>
       `;
       
-      await transporter.sendMail({
-        from: `"Kenya on a Budget Safaris" <${process.env.EMAIL_USER}>`,
-        to: affiliateData.email,
-        subject: 'New Commission Earned - KenyaOnABudget Safaris',
-        html: affiliateEmailHtml
-      });
+      // Send the email with our new email function
+      await sendEmail(
+        affiliateData.email,
+        'New Commission Earned - KenyaOnABudget Safaris',
+        affiliateEmailHtml,
+        {
+          isAdmin: false,
+          emailKey: `commission-${affiliateId}-${receiptNumber}-${Date.now()}`
+        }
+      );
     }
     
-    // Send email to admin
+    // Send email to admin with modern template
     const adminEmailHtml = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e6e6e6;">
-        <div style="background-color: #e67e22; padding: 20px; text-align: center; color: white;">
-          <h1 style="margin: 0;">Affiliate Conversion Alert</h1>
-        </div>
-        
-        <div style="padding: 20px;">
-          <p>A new booking has been made through an affiliate link:</p>
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Affiliate Conversion Alert - KenyaOnABudget Safaris</title>
+      </head>
+      <body style="font-family: Arial, Helvetica, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f7f7f7;">
+        <table cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width: 650px; margin: 0 auto; background-color: #ffffff;">
+          <!-- Header -->
+          <tr>
+            <td style="padding: 20px; text-align: center; background-color: #ffffff; border-bottom: 1px solid #e0e0e0;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td>
+                    <div style="display: inline-block; width: 50px; height: 50px; background-color: #f5f5f5; border-radius: 8px; text-align: center; line-height: 50px; font-weight: bold; font-size: 24px; color: #e67e22;">K</div>
+                  </td>
+                  <td style="padding-left: 15px; text-align: left;">
+                    <h1 style="margin: 0; font-size: 24px; color: #e67e22;">KenyaOnABudget Safaris</h1>
+                    <p style="margin: 5px 0 0; font-size: 14px; color: #666;">Kenya On Your Terms: Smart Or Grand We Make it Happen!</p>
+                  </td>
+                </tr>
+              </table>
+              <p style="margin-top: 15px; font-size: 14px; color: #666; text-align: right;">
+                Conversion Alert #${referenceId}<br>
+                ${currentDate}
+              </p>
+            </td>
+          </tr>
           
-          <div style="background-color: #f8f8f8; padding: 15px; margin: 20px 0; border-left: 4px solid #e67e22;">
-            <p><strong>Affiliate:</strong> ${affiliateData.name} (${affiliateData.email})</p>
-            <p><strong>Package:</strong> ${packageName}</p>
-            <p><strong>Booking Amount:</strong> £${formattedPurchase}</p>
-            <p><strong>Commission (10%):</strong> £${formattedCommission}</p>
-            <p><strong>Time:</strong> ${new Date().toLocaleString()}</p>
-          </div>
+          <!-- Banner -->
+          <tr>
+            <td style="padding: 30px 20px; background-color: #e67e22; color: #ffffff;">
+              <h2 style="margin: 0 0 10px; font-size: 24px;">Affiliate Conversion Alert</h2>
+              <p style="margin: 0 0 15px; font-size: 18px;">A new booking has been made through an affiliate link</p>
+              <p style="margin: 0; font-size: 16px; background-color: rgba(255,255,255,0.2); display: inline-block; padding: 5px 10px; border-radius: 4px;">Amount: £${formattedPurchase}</p>
+            </td>
+          </tr>
           
-          <p>This commission is pending and will need to be approved before it becomes available to the affiliate.</p>
+          <!-- Conversion Information -->
+          <tr>
+            <td style="padding: 30px 20px;">
+              <h3 style="margin: 0 0 20px; font-size: 18px; color: #e67e22; border-bottom: 2px solid #e67e22; padding-bottom: 10px;">Conversion Details</h3>
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 20px; background-color: #f8f8f8; border-radius: 8px; border-left: 4px solid #e67e22;">
+                <tr>
+                  <td style="padding: 20px;">
+                    <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                      <tr>
+                        <td width="50%" valign="top" style="padding-bottom: 15px;">
+                          <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Affiliate</p>
+                          <p style="margin: 0; font-size: 16px; font-weight: 600;">${affiliateData.name} (${affiliateData.email})</p>
+                        </td>
+                        <td width="50%" valign="top" style="padding-bottom: 15px;">
+                          <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Package</p>
+                          <p style="margin: 0; font-size: 16px; font-weight: 600;">${packageName}</p>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td width="50%" valign="top" style="padding-bottom: 15px;">
+                          <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Booking Amount</p>
+                          <p style="margin: 0; font-size: 16px; font-weight: 600;">£${formattedPurchase}</p>
+                        </td>
+                        <td width="50%" valign="top" style="padding-bottom: 15px;">
+                          <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Commission (10%)</p>
+                          <p style="margin: 0; font-size: 16px; font-weight: 600;">£${formattedCommission}</p>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td width="50%" valign="top" style="padding-bottom: 15px;">
+                          <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Customer</p>
+                          <p style="margin: 0; font-size: 16px; font-weight: 600;">${details.customerName || 'Not provided'} (${details.customerEmail || 'No email'})</p>
+                        </td>
+                        <td width="50%" valign="top" style="padding-bottom: 15px;">
+                          <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Time</p>
+                          <p style="margin: 0; font-size: 16px; font-weight: 600;">${currentDate}</p>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td width="50%" valign="top">
+                          <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Reference ID</p>
+                          <p style="margin: 0; font-size: 16px; font-weight: 600;">${referenceId}</p>
+                        </td>
+                        <td width="50%" valign="top">
+                          <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Status</p>
+                          <p style="margin: 0; font-size: 16px; font-weight: 600; display: inline-block; padding: 3px 10px; background-color: #FFB74D; color: white; border-radius: 12px;">Pending Approval</p>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+              
+              <p style="margin-bottom: 20px; font-size: 16px; color: #444; line-height: 1.5;">
+                This commission is pending and will need to be approved before it becomes available to the affiliate.
+              </p>
+              
+              <div style="text-align: center;">
+                <a href="https://kenyaonabudgetsafaris.co.uk/admin/affiliates.html" style="background-color: #e67e22; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: 600; display: inline-block;">View in Admin Panel</a>
+              </div>
+              
+              <!-- System Info -->
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 30px 0 10px; text-align: center; border-top: 1px dashed #e0e0e0;">
+                <tr>
+                  <td style="padding: 30px 0 10px;">
+                    <p style="margin: 0; font-size: 14px; color: #777;">This message was automatically generated by the affiliate tracking system.</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
           
-          <p style="margin-top: 30px;">
-            <a href="https://kenyaonabudgetsafaris.co.uk/admin/affiliates.html" style="background-color: #e67e22; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View in Admin Panel</a>
-          </p>
-        </div>
-      </div>
+          <!-- Footer -->
+          <tr>
+            <td style="padding: 20px; background-color: #f5f5f5; text-align: center; font-size: 14px; color: #666;">
+              <p style="margin: 0 0 10px; font-weight: 700; color: #555; font-size: 16px;">KenyaOnABudget Safaris</p>
+              <p style="margin: 0 0 10px;">FARINGDON (SN7), SHELLINGFORD, FERNHAM ROAD<br>UNITED KINGDOM</p>
+              <p style="margin: 10px 0;">
+                Email: <a href="mailto:info@kenyaonabudgetsafaris.co.uk" style="color: #e67e22; text-decoration: none;">info@kenyaonabudgetsafaris.co.uk</a> | 
+                Phone: +44 7376 642 148
+              </p>
+              <p style="margin: 20px 0 0; font-size: 12px; color: #777;">
+                &copy; ${new Date().getFullYear()} KenyaOnABudget Safaris. All rights reserved.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
     `;
     
-    // Send to all admin emails
+    // Send to all admin emails with our new email function
     for (const adminEmail of CONFIG.ADMIN_EMAILS) {
-      await transporter.sendMail({
-        from: `"Kenya on a Budget Safaris" <${process.env.EMAIL_USER}>`,
-        to: adminEmail,
-        subject: 'New Affiliate Conversion - KenyaOnABudget Safaris',
-        html: adminEmailHtml
-      });
+      await sendEmail(
+        adminEmail,
+        'New Affiliate Conversion - KenyaOnABudget Safaris',
+        adminEmailHtml,
+        {
+          isAdmin: true,
+          emailKey: `admin-conversion-${adminEmail}-${receiptNumber}-${Date.now()}`
+        }
+      );
     }
   } catch (error) {
     console.error('Error sending conversion emails:', error);
   }
 }
 
+// Updated welcome email function with modern template
 async function sendWelcomeEmails(userId, affiliateData, password) {
   try {
-    // Generate welcome email content for affiliate
+    // Generate welcome email content for affiliate with modern template
     const passwordSection = password ? `
-      <div style="background-color: #f8f8f8; padding: 15px; margin: 20px 0; border-left: 4px solid #e67e22;">
-        <p><strong>Your login details:</strong></p>
-        <p><strong>Email:</strong> ${affiliateData.email}</p>
-        <p><strong>Password:</strong> ${password}</p>
-        <p style="color: #e74c3c; font-size: 12px;">Please save this information and change your password after logging in.</p>
+      <div style="background-color: #f8f8f8; padding: 15px; margin: 20px 0; border-radius: 8px; border-left: 4px solid #e67e22;">
+        <p style="margin: 0 0 10px; font-size: 16px; font-weight: 600; color: #444;">Your login details:</p>
+        <table width="100%" cellpadding="0" cellspacing="0" border="0">
+          <tr>
+            <td width="30%" style="padding-bottom: 10px;">
+              <p style="margin: 0; font-size: 14px; color: #666; font-weight: bold;">Email:</p>
+            </td>
+            <td width="70%" style="padding-bottom: 10px;">
+              <p style="margin: 0; font-size: 14px; color: #444;">${affiliateData.email}</p>
+            </td>
+          </tr>
+          <tr>
+            <td width="30%">
+              <p style="margin: 0; font-size: 14px; color: #666; font-weight: bold;">Password:</p>
+            </td>
+            <td width="70%">
+              <p style="margin: 0; font-size: 14px; color: #444;">${password}</p>
+            </td>
+          </tr>
+        </table>
+        <p style="margin: 10px 0 0; color: #e74c3c; font-size: 13px;">Please save this information and change your password after logging in.</p>
       </div>
     ` : '';
     
     const affiliateEmailHtml = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e6e6e6;">
-        <div style="background-color: #e67e22; padding: 20px; text-align: center; color: white;">
-          <h1 style="margin: 0;">Welcome to KenyaOnABudget Affiliate Program!</h1>
-        </div>
-        
-        <div style="padding: 20px;">
-          <p>Hello ${affiliateData.name},</p>
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Welcome to KenyaOnABudget Affiliate Program!</title>
+      </head>
+      <body style="font-family: Arial, Helvetica, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f7f7f7;">
+        <table cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width: 650px; margin: 0 auto; background-color: #ffffff;">
+          <!-- Header -->
+          <tr>
+            <td style="padding: 20px; text-align: center; background-color: #ffffff; border-bottom: 1px solid #e0e0e0;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td>
+                    <div style="display: inline-block; width: 50px; height: 50px; background-color: #f5f5f5; border-radius: 8px; text-align: center; line-height: 50px; font-weight: bold; font-size: 24px; color: #e67e22;">K</div>
+                  </td>
+                  <td style="padding-left: 15px; text-align: left;">
+                    <h1 style="margin: 0; font-size: 24px; color: #e67e22;">KenyaOnABudget Safaris</h1>
+                    <p style="margin: 5px 0 0; font-size: 14px; color: #666;">Kenya On Your Terms: Smart Or Grand We Make it Happen!</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
           
-          <p>Welcome to the KenyaOnABudget Safaris Affiliate Program! We're excited to have you on board.</p>
+          <!-- Banner -->
+          <tr>
+            <td style="padding: 30px 20px; background-color: #e67e22; color: #ffffff;">
+              <h2 style="margin: 0 0 10px; font-size: 24px;">Welcome to KenyaOnABudget Affiliate Program!</h2>
+              <p style="margin: 0; font-size: 16px;">We're excited to have you on board as our new affiliate partner.</p>
+            </td>
+          </tr>
           
-          <p>As our affiliate partner, you'll earn 10% commission on every booking made through your unique referral links.</p>
+          <!-- Main Content -->
+          <tr>
+            <td style="padding: 30px 20px;">
+              <p style="margin-bottom: 20px; font-size: 16px; color: #444; line-height: 1.5;">
+                Hello ${affiliateData.name},
+              </p>
+              
+              <p style="margin-bottom: 20px; font-size: 16px; color: #444; line-height: 1.5;">
+                Welcome to the KenyaOnABudget Safaris Affiliate Program! As our affiliate partner, you'll earn 10% commission on every booking made through your unique referral links.
+              </p>
+              
+              ${passwordSection}
+              
+              <h3 style="margin: 30px 0 20px; font-size: 18px; color: #e67e22; border-bottom: 2px solid #e67e22; padding-bottom: 10px;">Getting Started</h3>
+              
+              <ol style="margin: 0 0 30px; padding-left: 25px;">
+                <li style="margin-bottom: 12px; font-size: 16px; color: #444;">Log in to your affiliate dashboard to access your unique referral links</li>
+                <li style="margin-bottom: 12px; font-size: 16px; color: #444;">Share these links on your website, social media, or with your network</li>
+                <li style="margin-bottom: 12px; font-size: 16px; color: #444;">Start earning 10% commission on every booking made through your links</li>
+                <li style="margin-bottom: 12px; font-size: 16px; color: #444;">Track your performance and earnings in real-time from your dashboard</li>
+                <li style="font-size: 16px; color: #444;">Request payouts once your balance reaches £${CONFIG.MIN_PAYOUT_AMOUNT}</li>
+              </ol>
+              
+              <div style="text-align: center; margin: 30px 0;">
+                <a href="https://kenyaonabudgetsafaris.co.uk/affiliate-dashboard.html" style="background-color: #e67e22; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: 600; display: inline-block;">Access Your Dashboard</a>
+              </div>
+              
+              <!-- Support Section -->
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 30px 0; background-color: #f9f9f9; border-radius: 8px;">
+                <tr>
+                  <td style="padding: 20px;">
+                    <h4 style="margin: 0 0 15px; color: #e67e22; font-size: 18px;">Need Help?</h4>
+                    <p style="margin: 0; font-size: 16px; color: #444; line-height: 1.5;">
+                      If you have any questions, please don't hesitate to contact us at <a href="mailto:info@kenyaonabudgetsafaris.co.uk" style="color: #e67e22; text-decoration: none;">info@kenyaonabudgetsafaris.co.uk</a>. We're here to help you succeed!
+                    </p>
+                  </td>
+                </tr>
+              </table>
+              
+              <!-- Thank You Message -->
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 30px 0 10px; text-align: center; border-top: 1px dashed #e0e0e0; border-bottom: 1px dashed #e0e0e0;">
+                <tr>
+                  <td style="padding: 30px 0;">
+                    <h3 style="margin: 0 0 15px; color: #e67e22; font-size: 20px;">Thank You For Joining Our Team!</h3>
+                    <p style="margin: 0; font-size: 16px; color: #444; font-style: italic;">We look forward to a successful partnership promoting amazing safari experiences in Kenya.</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
           
-          ${passwordSection}
-          
-          <h3 style="color: #e67e22; margin-top: 30px;">Getting Started</h3>
-          
-          <ol>
-            <li>Log in to your affiliate dashboard to access your unique referral links</li>
-            <li>Share these links on your website, social media, or with your network</li>
-            <li>Start earning 10% commission on every booking made through your links</li>
-            <li>Track your performance and earnings in real-time from your dashboard</li>
-            <li>Request payouts once your balance reaches £${CONFIG.MIN_PAYOUT_AMOUNT}</li>
-          </ol>
-          
-          <p style="margin-top: 30px;">
-            <a href="https://kenyaonabudgetsafaris.co.uk/affiliate-dashboard.html" style="background-color: #e67e22; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Access Your Dashboard</a>
-          </p>
-          
-          <p style="margin-top: 30px; font-style: italic; color: #666; border-top: 1px solid #eee; padding-top: 15px;">
-            If you have any questions, please don't hesitate to contact us at info@kenyaonabudgetsafaris.co.uk. We're here to help you succeed!
-          </p>
-        </div>
-      </div>
+          <!-- Footer -->
+          <tr>
+            <td style="padding: 20px; background-color: #f5f5f5; text-align: center; font-size: 14px; color: #666;">
+              <p style="margin: 0 0 10px; font-weight: 700; color: #555; font-size: 16px;">KenyaOnABudget Safaris</p>
+              <p style="margin: 0 0 10px;">FARINGDON (SN7), SHELLINGFORD, FERNHAM ROAD<br>UNITED KINGDOM</p>
+              <p style="margin: 10px 0;">
+                Email: <a href="mailto:info@kenyaonabudgetsafaris.co.uk" style="color: #e67e22; text-decoration: none;">info@kenyaonabudgetsafaris.co.uk</a> | 
+                Phone: +44 7376 642 148
+              </p>
+              <p style="margin: 20px 0 0; font-size: 12px; color: #777;">
+                &copy; ${new Date().getFullYear()} KenyaOnABudget Safaris. All rights reserved.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
     `;
     
-    // Send email to affiliate
-    await transporter.sendMail({
-      from: `"Kenya on a Budget Safaris" <${process.env.EMAIL_USER}>`,
-      to: affiliateData.email,
-      subject: 'Welcome to KenyaOnABudget Affiliate Program!',
-      html: affiliateEmailHtml
-    });
+    // Send email to affiliate with our new email function
+    await sendEmail(
+      affiliateData.email, 
+      'Welcome to KenyaOnABudget Affiliate Program!', 
+      affiliateEmailHtml,
+      {
+        isAdmin: false,
+        emailKey: `welcome-affiliate-${userId}-${Date.now()}`
+      }
+    );
     
-    // Send notification to admin
+    // Send notification to admin with modern template
     const adminEmailHtml = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e6e6e6;">
-        <div style="background-color: #e67e22; padding: 20px; text-align: center; color: white;">
-          <h1 style="margin: 0;">New Affiliate Registration</h1>
-        </div>
-        
-        <div style="padding: 20px;">
-          <p>A new affiliate has registered on the KenyaOnABudget Safaris website:</p>
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>New Affiliate Registration - KenyaOnABudget Safaris</title>
+      </head>
+      <body style="font-family: Arial, Helvetica, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f7f7f7;">
+        <table cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width: 650px; margin: 0 auto; background-color: #ffffff;">
+          <!-- Header -->
+          <tr>
+            <td style="padding: 20px; text-align: center; background-color: #ffffff; border-bottom: 1px solid #e0e0e0;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td>
+                    <div style="display: inline-block; width: 50px; height: 50px; background-color: #f5f5f5; border-radius: 8px; text-align: center; line-height: 50px; font-weight: bold; font-size: 24px; color: #e67e22;">K</div>
+                  </td>
+                  <td style="padding-left: 15px; text-align: left;">
+                    <h1 style="margin: 0; font-size: 24px; color: #e67e22;">KenyaOnABudget Safaris</h1>
+                    <p style="margin: 5px 0 0; font-size: 14px; color: #666;">Kenya On Your Terms: Smart Or Grand We Make it Happen!</p>
+                  </td>
+                </tr>
+              </table>
+              <p style="margin-top: 15px; font-size: 14px; color: #666; text-align: right;">
+                Registration Alert<br>
+                ${new Date().toLocaleString()}
+              </p>
+            </td>
+          </tr>
           
-          <div style="background-color: #f8f8f8; padding: 15px; margin: 20px 0; border-left: 4px solid #e67e22;">
-            <p><strong>Name:</strong> ${affiliateData.name}</p>
-            <p><strong>Email:</strong> ${affiliateData.email}</p>
-            <p><strong>Phone:</strong> ${affiliateData.phone || 'Not provided'}</p>
-            <p><strong>Website:</strong> ${affiliateData.website || 'Not provided'}</p>
-            <p><strong>Registration Date:</strong> ${new Date().toLocaleString()}</p>
-          </div>
+          <!-- Banner -->
+          <tr>
+            <td style="padding: 30px 20px; background-color: #e67e22; color: #ffffff;">
+              <h2 style="margin: 0 0 10px; font-size: 24px;">New Affiliate Registration</h2>
+              <p style="margin: 0; font-size: 16px;">A new affiliate has registered on the KenyaOnABudget Safaris website</p>
+            </td>
+          </tr>
           
-          <p>The affiliate account has been created and initial referral links have been generated.</p>
+          <!-- Affiliate Information -->
+          <tr>
+            <td style="padding: 30px 20px;">
+              <h3 style="margin: 0 0 20px; font-size: 18px; color: #e67e22; border-bottom: 2px solid #e67e22; padding-bottom: 10px;">Affiliate Details</h3>
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom: 20px; background-color: #f8f8f8; border-radius: 8px; border-left: 4px solid #e67e22;">
+                <tr>
+                  <td style="padding: 20px;">
+                    <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                      <tr>
+                        <td width="50%" valign="top" style="padding-bottom: 15px;">
+                          <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Name</p>
+                          <p style="margin: 0; font-size: 16px; font-weight: 600;">${affiliateData.name}</p>
+                        </td>
+                        <td width="50%" valign="top" style="padding-bottom: 15px;">
+                          <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Email</p>
+                          <p style="margin: 0; font-size: 16px; font-weight: 600;">${affiliateData.email}</p>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td width="50%" valign="top" style="padding-bottom: 15px;">
+                          <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Phone</p>
+                          <p style="margin: 0; font-size: 16px; font-weight: 600;">${affiliateData.phone || 'Not provided'}</p>
+                        </td>
+                        <td width="50%" valign="top" style="padding-bottom: 15px;">
+                          <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Website</p>
+                          <p style="margin: 0; font-size: 16px; font-weight: 600;">${affiliateData.website || 'Not provided'}</p>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td width="50%" valign="top" style="padding-bottom: 15px;">
+                          <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">User ID</p>
+                          <p style="margin: 0; font-size: 16px; font-weight: 600;">${userId}</p>
+                        </td>
+                        <td width="50%" valign="top" style="padding-bottom: 15px;">
+                          <p style="margin: 0 0 5px; font-size: 12px; color: #666; text-transform: uppercase; font-weight: bold;">Registration Date</p>
+                          <p style="margin: 0; font-size: 16px; font-weight: 600;">${new Date().toLocaleString()}</p>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+              
+              <p style="margin-bottom: 20px; font-size: 16px; color: #444; line-height: 1.5;">
+                The affiliate account has been created and initial referral links have been generated.
+              </p>
+              
+              <div style="text-align: center;">
+                <a href="https://kenyaonabudgetsafaris.co.uk/admin/affiliates.html" style="background-color: #e67e22; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; font-weight: 600; display: inline-block;">View in Admin Panel</a>
+              </div>
+              
+              <!-- System Info -->
+              <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 30px 0 10px; text-align: center; border-top: 1px dashed #e0e0e0;">
+                <tr>
+                  <td style="padding: 30px 0 10px;">
+                    <p style="margin: 0; font-size: 14px; color: #777;">This message was automatically generated by the affiliate system.</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
           
-          <p style="margin-top: 30px;">
-            <a href="https://kenyaonabudgetsafaris.co.uk/admin/affiliates.html" style="background-color: #e67e22; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View in Admin Panel</a>
-          </p>
-        </div>
-      </div>
+          <!-- Footer -->
+          <tr>
+            <td style="padding: 20px; background-color: #f5f5f5; text-align: center; font-size: 14px; color: #666;">
+              <p style="margin: 0 0 10px; font-weight: 700; color: #555; font-size: 16px;">KenyaOnABudget Safaris</p>
+              <p style="margin: 0 0 10px;">FARINGDON (SN7), SHELLINGFORD, FERNHAM ROAD<br>UNITED KINGDOM</p>
+              <p style="margin: 10px 0;">
+                Email: <a href="mailto:info@kenyaonabudgetsafaris.co.uk" style="color: #e67e22; text-decoration: none;">info@kenyaonabudgetsafaris.co.uk</a> | 
+                Phone: +44 7376 642 148
+              </p>
+              <p style="margin: 20px 0 0; font-size: 12px; color: #777;">
+                &copy; ${new Date().getFullYear()} KenyaOnABudget Safaris. All rights reserved.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
     `;
     
-    // Send to all admin emails
+    // Send to all admin emails with our new email function
     for (const adminEmail of CONFIG.ADMIN_EMAILS) {
-      await transporter.sendMail({
-        from: `"Kenya on a Budget Safaris" <${process.env.EMAIL_USER}>`,
-        to: adminEmail,
-        subject: 'New Affiliate Registration - KenyaOnABudget Safaris',
-        html: adminEmailHtml
-      });
+      await sendEmail(
+        adminEmail,
+        'New Affiliate Registration - KenyaOnABudget Safaris',
+        adminEmailHtml,
+        {
+          isAdmin: true,
+          emailKey: `admin-registration-${userId}-${adminEmail}-${Date.now()}`
+        }
+      );
     }
   } catch (error) {
     console.error('Error sending welcome emails:', error);
