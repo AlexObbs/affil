@@ -79,24 +79,14 @@ const CONFIG = {
   MIN_PAYOUT_AMOUNT: 50, // Minimum amount in GBP for payouts
 };
 
-// Email setup - with error handling
-let transporter = null;
-try {
-  if (process.env.EMAIL_USER && process.env.EMAIL_PASSWORD) {
-    transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASSWORD
-      }
-    });
-    console.log('Email transport initialized');
-  } else {
-    console.error('Email credentials missing. Email features will not work.');
+// Email setup - with ORIGINAL email configuration
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASSWORD
   }
-} catch (error) {
-  console.error('Error setting up email transport:', error);
-}
+});
 
 // Helper Functions
 function formatDate(date) {
@@ -255,14 +245,12 @@ app.post('/conversion', async (req, res) => {
     // Update statistics
     await updateConversionStatistics(affiliateId, linkId, parseFloat(purchaseAmount), commissionAmount);
 
-    // Send email notifications if email transport is set up
-    if (transporter) {
-      await sendConversionEmails(affiliateId, linkId, parseFloat(purchaseAmount), commissionAmount, {
-        packageName: packageName,
-        customerEmail: customerEmail,
-        customerName: customerName
-      });
-    }
+    // Send email notifications
+    await sendConversionEmails(affiliateId, linkId, parseFloat(purchaseAmount), commissionAmount, {
+      packageName: packageName,
+      customerEmail: customerEmail,
+      customerName: customerName
+    });
 
     res.json({ success: true, conversionId: conversionRef.id });
   } catch (error) {
@@ -318,10 +306,8 @@ app.post('/register', async (req, res) => {
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    // Send welcome emails if email transport is set up
-    if (transporter) {
-      await sendWelcomeEmails(userRecord.uid, affiliateData, password);
-    }
+    // Send welcome emails
+    await sendWelcomeEmails(userRecord.uid, affiliateData, password);
 
     res.json({ success: true, userId: userRecord.uid });
   } catch (error) {
@@ -628,8 +614,6 @@ async function createInitialReferralLinks(userId) {
 
 async function sendConversionEmails(affiliateId, linkId, purchaseAmount, commissionAmount, details) {
   try {
-    if (!transporter) return;
-    
     // Get affiliate details
     const affiliateDoc = await db.collection('affiliates').doc(affiliateId).get();
     
@@ -729,8 +713,6 @@ async function sendConversionEmails(affiliateId, linkId, purchaseAmount, commiss
 
 async function sendWelcomeEmails(userId, affiliateData, password) {
   try {
-    if (!transporter) return;
-    
     // Generate welcome email content for affiliate
     const passwordSection = password ? `
       <div style="background-color: #f8f8f8; padding: 15px; margin: 20px 0; border-left: 4px solid #e67e22;">
