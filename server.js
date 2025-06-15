@@ -16,14 +16,59 @@ app.use(cors({
 }));
 app.use(bodyParser.json());
 
-// Initialize Firebase
-admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL
-  })
+// Check if required environment variables are set
+const missingVars = [];
+['FIREBASE_PROJECT_ID', 'FIREBASE_PRIVATE_KEY', 'FIREBASE_CLIENT_EMAIL'].forEach(varName => {
+  if (!process.env[varName]) missingVars.push(varName);
 });
+
+if (missingVars.length > 0) {
+  console.error(`ERROR: Missing required environment variables: ${missingVars.join(', ')}`);
+  console.error('Please set these variables in your Render dashboard or .env file');
+}
+
+// Initialize Firebase - with error handling
+try {
+  let firebaseConfig = {};
+  
+  // Check for credentials in environment variables
+  if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL) {
+    // Construct the Firebase config
+    firebaseConfig = {
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    };
+    
+    // Handle the private key (which might contain newlines)
+    if (process.env.FIREBASE_PRIVATE_KEY) {
+      // Handle both formats: with or without quotes and escaped newlines
+      const privateKey = process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n');
+      firebaseConfig.privateKey = privateKey;
+    }
+  } 
+  
+  // Check for JSON credential string
+  else if (process.env.FIREBASE_CREDENTIALS_JSON) {
+    try {
+      const credentials = JSON.parse(process.env.FIREBASE_CREDENTIALS_JSON);
+      firebaseConfig = credentials;
+    } catch (e) {
+      console.error('Error parsing FIREBASE_CREDENTIALS_JSON:', e);
+    }
+  }
+
+  // Initialize Firebase if we have config
+  if (Object.keys(firebaseConfig).length > 0) {
+    admin.initializeApp({
+      credential: admin.credential.cert(firebaseConfig)
+    });
+    console.log('Firebase initialized successfully');
+  } else {
+    console.error('No Firebase configuration found. Firebase features will not work.');
+  }
+} catch (error) {
+  console.error('Error initializing Firebase:', error);
+}
 
 const db = admin.firestore();
 
@@ -34,14 +79,24 @@ const CONFIG = {
   MIN_PAYOUT_AMOUNT: 50, // Minimum amount in GBP for payouts
 };
 
-// Email setup
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASSWORD
+// Email setup - with error handling
+let transporter = null;
+try {
+  if (process.env.EMAIL_USER && process.env.EMAIL_PASSWORD) {
+    transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASSWORD
+      }
+    });
+    console.log('Email transport initialized');
+  } else {
+    console.error('Email credentials missing. Email features will not work.');
   }
-});
+} catch (error) {
+  console.error('Error setting up email transport:', error);
+}
 
 // Helper Functions
 function formatDate(date) {
@@ -62,6 +117,8 @@ function generateReferralCode(userId, linkType) {
 // Track affiliate clicks
 app.post('/api/affiliate/click', async (req, res) => {
   try {
+    if (!db) return res.status(500).json({ error: 'Firebase not initialized' });
+    
     const { refCode, url, path, userAgent, deviceType, source, timestamp } = req.body;
 
     // Find the referral link by refCode
@@ -107,13 +164,15 @@ app.post('/api/affiliate/click', async (req, res) => {
     res.json({ success: true, clickId: clickRef.id });
   } catch (error) {
     console.error('Error tracking click:', error);
-    res.status(500).json({ error: 'Error tracking click' });
+    res.status(500).json({ error: 'Error tracking click', details: error.message });
   }
 });
 
 // Track conversions
 app.post('/api/affiliate/conversion', async (req, res) => {
   try {
+    if (!db) return res.status(500).json({ error: 'Firebase not initialized' });
+    
     const { 
       affiliateCode, 
       clickId, 
@@ -196,23 +255,27 @@ app.post('/api/affiliate/conversion', async (req, res) => {
     // Update statistics
     await updateConversionStatistics(affiliateId, linkId, parseFloat(purchaseAmount), commissionAmount);
 
-    // Send email notifications
-    await sendConversionEmails(affiliateId, linkId, parseFloat(purchaseAmount), commissionAmount, {
-      packageName: packageName,
-      customerEmail: customerEmail,
-      customerName: customerName
-    });
+    // Send email notifications if email transport is set up
+    if (transporter) {
+      await sendConversionEmails(affiliateId, linkId, parseFloat(purchaseAmount), commissionAmount, {
+        packageName: packageName,
+        customerEmail: customerEmail,
+        customerName: customerName
+      });
+    }
 
     res.json({ success: true, conversionId: conversionRef.id });
   } catch (error) {
     console.error('Error tracking conversion:', error);
-    res.status(500).json({ error: 'Error tracking conversion' });
+    res.status(500).json({ error: 'Error tracking conversion', details: error.message });
   }
 });
 
 // Register new affiliate
 app.post('/api/affiliate/register', async (req, res) => {
   try {
+    if (!db) return res.status(500).json({ error: 'Firebase not initialized' });
+    
     const { name, email, phone, website, bio, password } = req.body;
 
     // Create user account in Firebase Auth
@@ -255,8 +318,10 @@ app.post('/api/affiliate/register', async (req, res) => {
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    // Send welcome emails
-    await sendWelcomeEmails(userRecord.uid, affiliateData, password);
+    // Send welcome emails if email transport is set up
+    if (transporter) {
+      await sendWelcomeEmails(userRecord.uid, affiliateData, password);
+    }
 
     res.json({ success: true, userId: userRecord.uid });
   } catch (error) {
@@ -281,6 +346,8 @@ app.post('/api/affiliate/register', async (req, res) => {
 // Get dashboard data
 app.get('/api/affiliate/dashboard', async (req, res) => {
   try {
+    if (!db) return res.status(500).json({ error: 'Firebase not initialized' });
+    
     // Get the current user ID from auth token
     const idToken = req.headers.authorization?.split('Bearer ')[1];
     
@@ -347,195 +414,222 @@ app.get('/api/affiliate/dashboard', async (req, res) => {
     });
   } catch (error) {
     console.error('Error getting dashboard data:', error);
-    res.status(500).json({ error: 'Error getting dashboard data' });
+    res.status(500).json({ error: 'Error getting dashboard data', details: error.message });
   }
 });
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'OK', message: 'Server is running' });
+  const status = {
+    status: 'OK',
+    message: 'Server is running',
+    environment: process.env.NODE_ENV || 'development',
+    firebaseInitialized: !!db,
+    emailInitialized: !!transporter,
+    timestamp: new Date().toISOString()
+  };
+  
+  res.status(200).json(status);
 });
 
 // Helper Functions for API operations
 
 async function updateClickStatistics(affiliateId, linkId, deviceType, source) {
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const formattedDate = formatDate(today);
-  
-  // Update daily stats
-  const dailyStatsRef = db.collection('dailyStats').doc(`${affiliateId}_${formattedDate}`);
-  
-  await db.runTransaction(async transaction => {
-    const docSnapshot = await transaction.get(dailyStatsRef);
+  try {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const formattedDate = formatDate(today);
     
-    if (!docSnapshot.exists) {
-      transaction.set(dailyStatsRef, {
-        affiliateId: affiliateId,
-        date: admin.firestore.Timestamp.fromDate(today),
-        clicks: 1,
-        conversions: 0,
-        earnings: 0
-      });
-    } else {
-      transaction.update(dailyStatsRef, {
-        clicks: admin.firestore.FieldValue.increment(1)
-      });
-    }
-  });
-  
-  // Update device stats
-  await db.collection('deviceStats').doc(`${affiliateId}_${formattedDate}_${deviceType}`).set({
-    affiliateId: affiliateId,
-    date: admin.firestore.Timestamp.fromDate(today),
-    device: deviceType,
-    clicks: admin.firestore.FieldValue.increment(1)
-  }, { merge: true });
-  
-  // Update source stats
-  await db.collection('sourceStats').doc(`${affiliateId}_${formattedDate}_${source}`).set({
-    affiliateId: affiliateId,
-    date: admin.firestore.Timestamp.fromDate(today),
-    source: source,
-    clicks: admin.firestore.FieldValue.increment(1)
-  }, { merge: true });
-  
-  // Update affiliate stats
-  await db.collection('affiliateStats').doc(`${affiliateId}_${formattedDate}`).set({
-    userId: affiliateId,
-    date: admin.firestore.Timestamp.fromDate(today),
-    impressions: admin.firestore.FieldValue.increment(1),
-    clicks: admin.firestore.FieldValue.increment(1)
-  }, { merge: true });
-  
-  // Update link performance
-  await db.collection('linkPerformance').doc(`${linkId}_${formattedDate}`).set({
-    linkId: linkId,
-    affiliateId: affiliateId,
-    date: admin.firestore.Timestamp.fromDate(today),
-    clicks: admin.firestore.FieldValue.increment(1)
-  }, { merge: true });
+    // Update daily stats
+    const dailyStatsRef = db.collection('dailyStats').doc(`${affiliateId}_${formattedDate}`);
+    
+    await db.runTransaction(async transaction => {
+      const docSnapshot = await transaction.get(dailyStatsRef);
+      
+      if (!docSnapshot.exists) {
+        transaction.set(dailyStatsRef, {
+          affiliateId: affiliateId,
+          date: admin.firestore.Timestamp.fromDate(today),
+          clicks: 1,
+          conversions: 0,
+          earnings: 0
+        });
+      } else {
+        transaction.update(dailyStatsRef, {
+          clicks: admin.firestore.FieldValue.increment(1)
+        });
+      }
+    });
+    
+    // Update device stats
+    await db.collection('deviceStats').doc(`${affiliateId}_${formattedDate}_${deviceType}`).set({
+      affiliateId: affiliateId,
+      date: admin.firestore.Timestamp.fromDate(today),
+      device: deviceType,
+      clicks: admin.firestore.FieldValue.increment(1)
+    }, { merge: true });
+    
+    // Update source stats
+    await db.collection('sourceStats').doc(`${affiliateId}_${formattedDate}_${source}`).set({
+      affiliateId: affiliateId,
+      date: admin.firestore.Timestamp.fromDate(today),
+      source: source,
+      clicks: admin.firestore.FieldValue.increment(1)
+    }, { merge: true });
+    
+    // Update affiliate stats
+    await db.collection('affiliateStats').doc(`${affiliateId}_${formattedDate}`).set({
+      userId: affiliateId,
+      date: admin.firestore.Timestamp.fromDate(today),
+      impressions: admin.firestore.FieldValue.increment(1),
+      clicks: admin.firestore.FieldValue.increment(1)
+    }, { merge: true });
+    
+    // Update link performance
+    await db.collection('linkPerformance').doc(`${linkId}_${formattedDate}`).set({
+      linkId: linkId,
+      affiliateId: affiliateId,
+      date: admin.firestore.Timestamp.fromDate(today),
+      clicks: admin.firestore.FieldValue.increment(1)
+    }, { merge: true });
+  } catch (error) {
+    console.error('Error updating click statistics:', error);
+  }
 }
 
 async function updateAffiliateBalance(affiliateId, commissionAmount) {
-  // Get the balances document for this affiliate
-  const balancesSnapshot = await db.collection('balances')
-    .where('userId', '==', affiliateId)
-    .limit(1)
-    .get();
-  
-  if (balancesSnapshot.empty) {
-    // Create a new balance document
-    await db.collection('balances').add({
+  try {
+    // Get the balances document for this affiliate
+    const balancesSnapshot = await db.collection('balances')
+      .where('userId', '==', affiliateId)
+      .limit(1)
+      .get();
+    
+    if (balancesSnapshot.empty) {
+      // Create a new balance document
+      await db.collection('balances').add({
+        userId: affiliateId,
+        available: 0,
+        pending: commissionAmount,
+        paid: 0,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    } else {
+      // Update existing balance document
+      const balanceDoc = balancesSnapshot.docs[0];
+      await balanceDoc.ref.update({
+        pending: admin.firestore.FieldValue.increment(commissionAmount),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    }
+    
+    // Add an earnings transaction record
+    await db.collection('earnings').add({
       userId: affiliateId,
-      available: 0,
-      pending: commissionAmount,
-      paid: 0,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      amount: commissionAmount,
+      date: admin.firestore.FieldValue.serverTimestamp(),
+      status: 'pending',
+      source: 'Referral',
+      description: 'Commission on booking',
+      packageName: 'Safari Package',
+      referenceId: 'COMM-' + crypto.randomBytes(3).toString('hex').toUpperCase(),
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
-  } else {
-    // Update existing balance document
-    const balanceDoc = balancesSnapshot.docs[0];
-    await balanceDoc.ref.update({
-      pending: admin.firestore.FieldValue.increment(commissionAmount),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    });
+  } catch (error) {
+    console.error('Error updating affiliate balance:', error);
   }
-  
-  // Add an earnings transaction record
-  await db.collection('earnings').add({
-    userId: affiliateId,
-    amount: commissionAmount,
-    date: admin.firestore.FieldValue.serverTimestamp(),
-    status: 'pending',
-    source: 'Referral',
-    description: 'Commission on booking',
-    packageName: 'Safari Package',
-    referenceId: 'COMM-' + crypto.randomBytes(3).toString('hex').toUpperCase(),
-    createdAt: admin.firestore.FieldValue.serverTimestamp()
-  });
 }
 
 async function updateConversionStatistics(affiliateId, linkId, purchaseAmount, commissionAmount) {
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const formattedDate = formatDate(today);
-  
-  // Update daily stats
-  const dailyStatsRef = db.collection('dailyStats').doc(`${affiliateId}_${formattedDate}`);
-  
-  await db.runTransaction(async transaction => {
-    const docSnapshot = await transaction.get(dailyStatsRef);
+  try {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const formattedDate = formatDate(today);
     
-    if (!docSnapshot.exists) {
-      transaction.set(dailyStatsRef, {
-        affiliateId: affiliateId,
-        date: admin.firestore.Timestamp.fromDate(today),
-        clicks: 0,
-        conversions: 1,
-        earnings: commissionAmount
-      });
-    } else {
-      transaction.update(dailyStatsRef, {
-        conversions: admin.firestore.FieldValue.increment(1),
-        earnings: admin.firestore.FieldValue.increment(commissionAmount)
-      });
-    }
-  });
-  
-  // Update monthly earnings
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  await db.collection('monthlyEarnings').doc(`${affiliateId}_${formatDate(monthStart)}`).set({
-    userId: affiliateId,
-    month: admin.firestore.Timestamp.fromDate(monthStart),
-    amount: admin.firestore.FieldValue.increment(commissionAmount),
-    count: admin.firestore.FieldValue.increment(1),
-    createdAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
-  
-  // Update affiliate stats
-  await db.collection('affiliateStats').doc(`${affiliateId}_${formattedDate}`).set({
-    userId: affiliateId,
-    date: admin.firestore.Timestamp.fromDate(today),
-    conversions: admin.firestore.FieldValue.increment(1),
-    earnings: admin.firestore.FieldValue.increment(commissionAmount)
-  }, { merge: true });
-  
-  // Update link performance
-  await db.collection('linkPerformance').doc(`${linkId}_${formattedDate}`).set({
-    linkId: linkId,
-    affiliateId: affiliateId,
-    date: admin.firestore.Timestamp.fromDate(today),
-    conversions: admin.firestore.FieldValue.increment(1),
-    earnings: admin.firestore.FieldValue.increment(commissionAmount)
-  }, { merge: true });
+    // Update daily stats
+    const dailyStatsRef = db.collection('dailyStats').doc(`${affiliateId}_${formattedDate}`);
+    
+    await db.runTransaction(async transaction => {
+      const docSnapshot = await transaction.get(dailyStatsRef);
+      
+      if (!docSnapshot.exists) {
+        transaction.set(dailyStatsRef, {
+          affiliateId: affiliateId,
+          date: admin.firestore.Timestamp.fromDate(today),
+          clicks: 0,
+          conversions: 1,
+          earnings: commissionAmount
+        });
+      } else {
+        transaction.update(dailyStatsRef, {
+          conversions: admin.firestore.FieldValue.increment(1),
+          earnings: admin.firestore.FieldValue.increment(commissionAmount)
+        });
+      }
+    });
+    
+    // Update monthly earnings
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    await db.collection('monthlyEarnings').doc(`${affiliateId}_${formatDate(monthStart)}`).set({
+      userId: affiliateId,
+      month: admin.firestore.Timestamp.fromDate(monthStart),
+      amount: admin.firestore.FieldValue.increment(commissionAmount),
+      count: admin.firestore.FieldValue.increment(1),
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    
+    // Update affiliate stats
+    await db.collection('affiliateStats').doc(`${affiliateId}_${formattedDate}`).set({
+      userId: affiliateId,
+      date: admin.firestore.Timestamp.fromDate(today),
+      conversions: admin.firestore.FieldValue.increment(1),
+      earnings: admin.firestore.FieldValue.increment(commissionAmount)
+    }, { merge: true });
+    
+    // Update link performance
+    await db.collection('linkPerformance').doc(`${linkId}_${formattedDate}`).set({
+      linkId: linkId,
+      affiliateId: affiliateId,
+      date: admin.firestore.Timestamp.fromDate(today),
+      conversions: admin.firestore.FieldValue.increment(1),
+      earnings: admin.firestore.FieldValue.increment(commissionAmount)
+    }, { merge: true });
+  } catch (error) {
+    console.error('Error updating conversion statistics:', error);
+  }
 }
 
 async function createInitialReferralLinks(userId) {
-  const linkTypes = ['general', 'facebook', 'twitter', 'instagram', 'tiktok'];
-  
-  // Create a link for each type
-  const linkPromises = linkTypes.map(linkType => {
-    const refCode = generateReferralCode(userId, linkType);
+  try {
+    const linkTypes = ['general', 'facebook', 'twitter', 'instagram', 'tiktok'];
     
-    return db.collection('referralLinks').add({
-      affiliateId: userId,
-      linkType: linkType,
-      refCode: refCode,
-      targetPage: '/',
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      clicks: 0,
-      conversions: 0,
-      earnings: 0
+    // Create a link for each type
+    const linkPromises = linkTypes.map(linkType => {
+      const refCode = generateReferralCode(userId, linkType);
+      
+      return db.collection('referralLinks').add({
+        affiliateId: userId,
+        linkType: linkType,
+        refCode: refCode,
+        targetPage: '/',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        clicks: 0,
+        conversions: 0,
+        earnings: 0
+      });
     });
-  });
-  
-  await Promise.all(linkPromises);
+    
+    await Promise.all(linkPromises);
+  } catch (error) {
+    console.error('Error creating initial referral links:', error);
+  }
 }
 
 async function sendConversionEmails(affiliateId, linkId, purchaseAmount, commissionAmount, details) {
   try {
+    if (!transporter) return;
+    
     // Get affiliate details
     const affiliateDoc = await db.collection('affiliates').doc(affiliateId).get();
     
@@ -635,6 +729,8 @@ async function sendConversionEmails(affiliateId, linkId, purchaseAmount, commiss
 
 async function sendWelcomeEmails(userId, affiliateData, password) {
   try {
+    if (!transporter) return;
+    
     // Generate welcome email content for affiliate
     const passwordSection = password ? `
       <div style="background-color: #f8f8f8; padding: 15px; margin: 20px 0; border-left: 4px solid #e67e22;">
@@ -734,4 +830,7 @@ async function sendWelcomeEmails(userId, affiliateData, password) {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`Firebase initialized: ${!!db}`);
+  console.log(`Email transport initialized: ${!!transporter}`);
 });
