@@ -112,10 +112,10 @@ function generateReferralCode(userId, linkType) {
   return `${prefix}-${typePrefix}-${random}-${timestamp}`;
 }
 
-// API Endpoints
+// API Endpoints - Using the original client paths
 
-// Track affiliate clicks
-app.post('/api/affiliate/click', async (req, res) => {
+// Track affiliate clicks - Original path
+app.post('/click', async (req, res) => {
   try {
     if (!db) return res.status(500).json({ error: 'Firebase not initialized' });
     
@@ -168,8 +168,8 @@ app.post('/api/affiliate/click', async (req, res) => {
   }
 });
 
-// Track conversions
-app.post('/api/affiliate/conversion', async (req, res) => {
+// Track conversions - Original path
+app.post('/conversion', async (req, res) => {
   try {
     if (!db) return res.status(500).json({ error: 'Firebase not initialized' });
     
@@ -271,8 +271,8 @@ app.post('/api/affiliate/conversion', async (req, res) => {
   }
 });
 
-// Register new affiliate
-app.post('/api/affiliate/register', async (req, res) => {
+// Register new affiliate - Original path
+app.post('/register', async (req, res) => {
   try {
     if (!db) return res.status(500).json({ error: 'Firebase not initialized' });
     
@@ -343,8 +343,8 @@ app.post('/api/affiliate/register', async (req, res) => {
   }
 });
 
-// Get dashboard data
-app.get('/api/affiliate/dashboard', async (req, res) => {
+// Get dashboard data - Original path
+app.get('/dashboard', async (req, res) => {
   try {
     if (!db) return res.status(500).json({ error: 'Firebase not initialized' });
     
