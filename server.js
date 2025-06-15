@@ -5,7 +5,6 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
-const axios = require('axios'); // For HTTP requests to cloud function
 
 // Initialize the app
 const app = express();
@@ -78,7 +77,6 @@ const CONFIG = {
   COMMISSION_RATE: 0.10, // 10% commission
   ADMIN_EMAILS: ['info@kenyaonabudgetsafaris.co.uk', 'amiraalexobbs@gmail.com'],
   MIN_PAYOUT_AMOUNT: 50, // Minimum amount in GBP for payouts
-  EMAIL_CLOUD_FUNCTION: 'https://us-central1-kenya-on-a-budget-safaris.cloudfunctions.net/sendEmailHTTP' // Cloud function for email sending
 };
 
 // Email setup - with ORIGINAL email configuration
@@ -102,95 +100,6 @@ function generateReferralCode(userId, linkType) {
   const timestamp = Date.now().toString(36).substring(0, 4);
   
   return `${prefix}-${typePrefix}-${random}-${timestamp}`;
-}
-
-// Helper function for improved email sending with fallbacks
-async function sendEmailWithFallback(to, subject, htmlContent, options = {}) {
-  const { isAdmin = false } = options;
-  const emailKey = options.emailKey || `email-${Date.now()}`;
-  console.log(`Attempting to send email to ${to}: ${subject}`);
-  
-  let emailSent = false;
-  
-  // Try cloud function first
-  try {
-    console.log(`Sending email via cloud function to: ${to}`);
-    const response = await axios.post(CONFIG.EMAIL_CLOUD_FUNCTION, {
-      to,
-      subject,
-      receiptHtml: htmlContent,
-      isAdmin,
-      emailKey
-    }, {
-      headers: {
-        'Content-Type': 'application/json',
-        'Origin': 'https://kenyaonabudgetsafaris.co.uk'
-      }
-    });
-    
-    if (response.status >= 200 && response.status < 300) {
-      console.log(`Email sent successfully via cloud function to ${to}`);
-      emailSent = true;
-    }
-  } catch (error) {
-    console.error(`Error sending email via cloud function to ${to}:`, error.message);
-  }
-  
-  // If cloud function failed, try nodemailer
-  if (!emailSent) {
-    try {
-      console.log(`Falling back to nodemailer for ${to}`);
-      await transporter.sendMail({
-        from: `"Kenya on a Budget Safaris" <${process.env.EMAIL_USER}>`,
-        to,
-        subject,
-        html: htmlContent
-      });
-      console.log(`Email sent successfully via nodemailer to ${to}`);
-      emailSent = true;
-    } catch (error) {
-      console.error(`Error sending email via nodemailer to ${to}:`, error.message);
-    }
-  }
-  
-  // If both methods failed, store in Firestore for later
-  if (!emailSent && db) {
-    try {
-      console.log(`Saving email to pendingEmails collection for ${to}`);
-      const pendingEmailsRef = db.collection('pendingEmails');
-      
-      // Check if there's already a pending email to avoid duplicates
-      const existingEmails = await pendingEmailsRef
-        .where('to', '==', to)
-        .where('emailKey', '==', emailKey)
-        .where('processed', '==', false)
-        .limit(1)
-        .get();
-        
-      if (existingEmails.empty) {
-        await pendingEmailsRef.add({
-          to,
-          subject,
-          receiptHtml: htmlContent,
-          isAdmin,
-          timestamp: admin.firestore.FieldValue.serverTimestamp(),
-          processed: false,
-          emailKey,
-          retryCount: 0,
-          lastAttempt: admin.firestore.FieldValue.serverTimestamp()
-        });
-        console.log(`Email saved to pendingEmails collection for ${to}`);
-        emailSent = true;
-      } else {
-        console.log(`Pending email already exists for ${to}, skipping to avoid duplicate`);
-        emailSent = true;
-      }
-    } catch (error) {
-      console.error(`Error saving email to pendingEmails for ${to}:`, error.message);
-    }
-  }
-  
-  return emailSent;
 }
 
 // API Endpoints - Using the original client paths
@@ -703,7 +612,6 @@ async function createInitialReferralLinks(userId) {
   }
 }
 
-// Updated conversion email function with modern template
 async function sendConversionEmails(affiliateId, linkId, purchaseAmount, commissionAmount, details) {
   try {
     // Get affiliate details
@@ -754,27 +662,12 @@ async function sendConversionEmails(affiliateId, linkId, purchaseAmount, commiss
         </div>
       `;
       
-      // Try to send with our improved email function
-      const emailSent = await sendEmailWithFallback(
-        affiliateData.email,
-        'New Commission Earned - KenyaOnABudget Safaris',
-        affiliateEmailHtml,
-        {
-          isAdmin: false,
-          emailKey: `commission-${affiliateId}-${Date.now()}`
-        }
-      );
-      
-      // If the improved method failed, fall back to the original method
-      if (!emailSent) {
-        console.log('Falling back to original email method for affiliate');
-        await transporter.sendMail({
-          from: `"Kenya on a Budget Safaris" <${process.env.EMAIL_USER}>`,
-          to: affiliateData.email,
-          subject: 'New Commission Earned - KenyaOnABudget Safaris',
-          html: affiliateEmailHtml
-        });
-      }
+      await transporter.sendMail({
+        from: `"Kenya on a Budget Safaris" <${process.env.EMAIL_USER}>`,
+        to: affiliateData.email,
+        subject: 'New Commission Earned - KenyaOnABudget Safaris',
+        html: affiliateEmailHtml
+      });
     }
     
     // Send email to admin
@@ -806,34 +699,18 @@ async function sendConversionEmails(affiliateId, linkId, purchaseAmount, commiss
     
     // Send to all admin emails
     for (const adminEmail of CONFIG.ADMIN_EMAILS) {
-      // Try to send with our improved email function
-      const emailSent = await sendEmailWithFallback(
-        adminEmail,
-        'New Affiliate Conversion - KenyaOnABudget Safaris',
-        adminEmailHtml,
-        {
-          isAdmin: true,
-          emailKey: `admin-conversion-${adminEmail}-${Date.now()}`
-        }
-      );
-      
-      // If the improved method failed, fall back to the original method
-      if (!emailSent) {
-        console.log(`Falling back to original email method for admin: ${adminEmail}`);
-        await transporter.sendMail({
-          from: `"Kenya on a Budget Safaris" <${process.env.EMAIL_USER}>`,
-          to: adminEmail,
-          subject: 'New Affiliate Conversion - KenyaOnABudget Safaris',
-          html: adminEmailHtml
-        });
-      }
+      await transporter.sendMail({
+        from: `"Kenya on a Budget Safaris" <${process.env.EMAIL_USER}>`,
+        to: adminEmail,
+        subject: 'New Affiliate Conversion - KenyaOnABudget Safaris',
+        html: adminEmailHtml
+      });
     }
   } catch (error) {
     console.error('Error sending conversion emails:', error);
   }
 }
 
-// Updated welcome email function with modern template
 async function sendWelcomeEmails(userId, affiliateData, password) {
   try {
     // Generate welcome email content for affiliate
@@ -883,27 +760,12 @@ async function sendWelcomeEmails(userId, affiliateData, password) {
     `;
     
     // Send email to affiliate
-    // Try to send with our improved email function
-    const emailSent = await sendEmailWithFallback(
-      affiliateData.email,
-      'Welcome to KenyaOnABudget Affiliate Program!',
-      affiliateEmailHtml,
-      {
-        isAdmin: false,
-        emailKey: `welcome-${userId}-${Date.now()}`
-      }
-    );
-    
-    // If the improved method failed, fall back to the original method
-    if (!emailSent) {
-      console.log('Falling back to original email method for affiliate welcome');
-      await transporter.sendMail({
-        from: `"Kenya on a Budget Safaris" <${process.env.EMAIL_USER}>`,
-        to: affiliateData.email,
-        subject: 'Welcome to KenyaOnABudget Affiliate Program!',
-        html: affiliateEmailHtml
-      });
-    }
+    await transporter.sendMail({
+      from: `"Kenya on a Budget Safaris" <${process.env.EMAIL_USER}>`,
+      to: affiliateData.email,
+      subject: 'Welcome to KenyaOnABudget Affiliate Program!',
+      html: affiliateEmailHtml
+    });
     
     // Send notification to admin
     const adminEmailHtml = `
@@ -934,27 +796,12 @@ async function sendWelcomeEmails(userId, affiliateData, password) {
     
     // Send to all admin emails
     for (const adminEmail of CONFIG.ADMIN_EMAILS) {
-      // Try to send with our improved email function
-      const adminEmailSent = await sendEmailWithFallback(
-        adminEmail,
-        'New Affiliate Registration - KenyaOnABudget Safaris',
-        adminEmailHtml,
-        {
-          isAdmin: true,
-          emailKey: `admin-welcome-${userId}-${adminEmail}-${Date.now()}`
-        }
-      );
-      
-      // If the improved method failed, fall back to the original method
-      if (!adminEmailSent) {
-        console.log(`Falling back to original email method for admin welcome: ${adminEmail}`);
-        await transporter.sendMail({
-          from: `"Kenya on a Budget Safaris" <${process.env.EMAIL_USER}>`,
-          to: adminEmail,
-          subject: 'New Affiliate Registration - KenyaOnABudget Safaris',
-          html: adminEmailHtml
-        });
-      }
+      await transporter.sendMail({
+        from: `"Kenya on a Budget Safaris" <${process.env.EMAIL_USER}>`,
+        to: adminEmail,
+        subject: 'New Affiliate Registration - KenyaOnABudget Safaris',
+        html: adminEmailHtml
+      });
     }
   } catch (error) {
     console.error('Error sending welcome emails:', error);
