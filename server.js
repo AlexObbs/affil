@@ -808,37 +808,35 @@ async function sendWelcomeEmails(userId, affiliateData, password) {
     console.error('Error sending welcome emails:', error);
   }
 }
-app.get('/ping', (req, res) => {
-  console.log('Ping received at', new Date().toISOString());
+// For each server, use this endpoint instead
+app.get('/ping-status', (req, res) => {
+  console.log('Ping-status received at', new Date().toISOString());
   res.status(200).json({ 
     status: 'active', 
-    server: 'affiliate-server',
+    server: 'server-name', // Change to your server name
     timestamp: new Date().toISOString(),
-    uptime: process.uptime()
+    message: 'Server is running'
   });
 });
 
-// Add this code at the bottom of your file, just before app.listen
-
-// Function to ping other servers
+// And update your ping functions to use this endpoint
 async function pingOtherServers() {
-  // Server URLs - update with your actual URLs
   const servers = [
-    'https://email-system-9p10.onrender.com',    // Your email server
-    'https://ping-server.onrender.com'           // Your ping server
+    'https://email-system-9p10.onrender.com',
+    'https://affil.onrender.com',
+    'https://ping-server.onrender.com'
   ];
   
-  console.log(`[${new Date().toISOString()}] Starting ping cycle from affiliate server`);
+  // Remove the current server from the list
+  const currentServer = 'https://affil.onrender.com'; // Change this
+  const serversToContact = servers.filter(s => s !== currentServer);
   
-  for (const server of servers) {
+  console.log(`[${new Date().toISOString()}] Starting ping cycle`);
+  
+  for (const server of serversToContact) {
     try {
-      console.log(`Pinging ${server}/ping`);
-      const response = await axios.get(`${server}/ping`, { 
-        timeout: 30000,  // 30 second timeout
-        headers: {
-          'User-Agent': 'AffiliateServer/1.0'
-        }
-      });
+      console.log(`Pinging ${server}/ping-status`);
+      const response = await axios.get(`${server}/ping-status`, { timeout: 30000 });
       console.log(`Successfully pinged ${server}, status: ${response.status}`);
     } catch (error) {
       let errorMessage = error.message;
@@ -847,7 +845,7 @@ async function pingOtherServers() {
       }
       console.error(`Error pinging ${server}: ${errorMessage}`);
       
-      // If /ping fails, try the root URL
+      // Try alternative endpoints
       try {
         console.log(`Trying root URL ${server}`);
         await axios.get(server, { timeout: 10000 });
@@ -857,17 +855,7 @@ async function pingOtherServers() {
       }
     }
   }
-  console.log('Ping cycle completed');
 }
-
-// Start ping cycle with a staggered delay to avoid all servers pinging at once
-setTimeout(() => {
-  console.log('Starting regular ping cycle from affiliate server');
-  // Initial ping
-  pingOtherServers();
-  // Then ping every 14 minutes
-  setInterval(pingOtherServers, 840000); // 14 minutes
-}, 45000); // Wait 45 seconds after startup (staggered from other servers)
 
 // Start the server
 const PORT = process.env.PORT || 3000;
