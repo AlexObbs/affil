@@ -4,6 +4,7 @@ const admin = require('firebase-admin');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const nodemailer = require('nodemailer');
+const axios = require('axios');
 const crypto = require('crypto');
 
 // Initialize the app
@@ -807,7 +808,45 @@ async function sendWelcomeEmails(userId, affiliateData, password) {
     console.error('Error sending welcome emails:', error);
   }
 }
+app.get('/ping', (req, res) => {
+  res.status(200).json({ 
+    status: 'active', 
+    server: 'email-server', // change this to 'affiliate-server' on the other server
+    timestamp: new Date().toISOString() 
+  });
+});
+// Function to ping other servers
+async function pingServers() {
+  const servers = [
+    'https://email-system-9p10.onrender.com',  // Replace with actual URL
+    'https://affil.onrender.com',  // Replace with actual URL
+    'https://ping-0iq2.onrender.com'  // Replace with actual URL
+  ];
+  
+  // Don't ping ourselves
+  const currentServer = 'https://affil.onrender.com'; // Replace with THIS server's URL
+  const serversToContact = servers.filter(s => s !== currentServer);
+  
+  console.log(`[${new Date().toISOString()}] Starting ping cycle`);
+  
+  for (const server of serversToContact) {
+    try {
+      await axios.get(`${server}/ping`, { timeout: 10000 });
+      console.log(`Successfully pinged ${server}`);
+    } catch (error) {
+      console.error(`Error pinging ${server}: ${error.message}`);
+    }
+  }
+}
 
+// Start pinging other servers every 14 minutes
+setTimeout(() => {
+  // First ping after 1 minute
+  pingServers();
+  
+  // Then ping every 14 minutes
+  setInterval(pingServers, 840000); // 14 minutes in milliseconds
+}, 60000);
 // Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
