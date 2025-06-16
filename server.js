@@ -5,6 +5,7 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
+const axios = require('axios');
 
 // Initialize the app
 const app = express();
